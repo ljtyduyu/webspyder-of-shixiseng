@@ -1,0 +1,556 @@
+library(rvest)
+library(RCurl)
+library(XML)
+library(stringr)
+library(dplyr)
+library(Rwebdriver)
+library(tidyr)
+library(dplyr)
+library(Rwordseg)
+library(wordcloud2)
+library(treemap)
+library(showtext)
+library(Cairo)
+library(ggplot2)
+library(scales)
+library(grid)
+library(RColorBrewer)
+library(ggimage)
+library(geojsonio)
+library(rgdal)
+library(plyr)
+
+
+
+cd "D:/Rwebdriver-master"
+java -jar selenium-server-standalone-3.3.1.jar
+
+start_session(root="http://localhost:4444/wd/hub/",browser ="chrome")
+options(stringsAsFactors=FALSE,warn=FALSE)
+baseurl<-"http://www.shixiseng.com/interns?k=&t=zh&c=%E5%85%A8%E5%9B%BD&p="
+pageurl<-paste0(baseurl,1:500)
+
+homepage=internship=companyweb=company=Position=address=salary=period=duration=NULL
+fun<-function(url){
+post.url(url=url)
+baseinfo<-read_html(url,encoding="utf-8")
+homepage  <-baseinfo%>%html_nodes("div.po-name>div.names>a")%>% html_attr("href")
+
+
+internship<-baseinfo%>%html_nodes("div.po-name>div.names>a")%>%html_text()
+companyweb<-baseinfo%>%html_nodes("div.po-name>div.part>a")%>%html_attr("href")
+
+company   <-baseinfo%>%html_nodes("div.po-name>div.part>a")%>%
+html_text()
+Position  <-baseinfo%>%html_nodes("div.po-name>div.part")%>%
+html_text()
+address   <-baseinfo%>%html_nodes("div.po-detail>div.addr>span")%>%
+html_text()
+salary    <-baseinfo%>%html_nodes("div.po-detail>div.xz>span:nth-child(2)")%>%
+html_text()
+period    <-baseinfo%>%html_nodes("div.po-detail>div.xz>span:nth-child(5)")%>%
+html_text()
+duration  <-baseinfo%>%html_nodes("div.po-detail>div.xz>span:nth-child(8)")%>%
+html_text()
+interninfo<-data.frame(homepage,internship,companyweb,company,Position,address,salary,period,duration)
+}
+final<-data.frame()
+for (i in pageurl){
+final<-rbind(final,fun(i))
+}
+quit_session()
+DT::datatable(final)
+write.table (final,"D:/R/File/shixiseng.csv",sep=",",row.names=FALSE)
+##############################################
+
+mydata<-read.csv("D:/R/File/shixiseng.csv",stringsAsFactors=FALSE,check.names=FALSE) 
+mydata<-mydata[-5001,]
+
+
+
+#补全实习发布单位的招聘信息主页：
+mydata$homepage<-str_c("http://www.shixiseng.com",mydata$homepage,sep="")
+
+#补全实习发布单位的公司信息主页：
+mydata$companyweb<-str_c("http://www.shixiseng.com",mydata$companyweb,sep="")
+mydata$work<-str_split(mydata$Position[1:10], " - ", simplify=TRUE)[,2]
+
+#清除salary中的空格和斜杠
+mydata$salary<-str_trim(mydata$salary,side="both")
+mydata$salary<-str_extract(mydata$salary,"\\d+\\-\\d+")
+
+#拆分实习工资的高低区间
+mydata$salary_low<-str_split(mydata$salary, "-", simplify=TRUE)[,1]
+mydata$salary_high<-str_split(mydata$salary, "-", simplify=TRUE)[,2]
+
+#清除period中的汉字和特殊字符
+mydata$period<-str_extract(mydata$period,"\\d+")
+
+#清除duration中的汉字和特殊字符
+mydata$duration<-str_extract(mydata$duration,"\\d+")
+
+mydata <- tbl_df(mydata)
+mydata<-select(mydata,-Position)
+
+#因为address中所含的地址可能有存在多个，影响我们后续的可视化分析，这里为了方便起见，一律使用第一个地址。
+
+mydata$address_unique<-str_split(mydata$address, ",", simplify=TRUE)[,1]
+
+
+
+
+至此，数据清洗工作告一段落，接下来我们要进入分析与可视化阶段
+
+names(mydata)
+
+"homepage"-------公司实习职位简介
+"internship"-----公司招聘性质
+"companyweb"-----公司主页
+"company"--------公司名称
+"address"--------所在地
+"address_unique"-所在地（唯一值，只取默认第一个地址）
+"salary"---------实习工资区间
+"salary_low"-----实习工资（最低值）
+"salary_high"----实习工资（最高值）
+"period"---------到岗天数（每周）
+"duration"-------实习周期（按月算）
+"work"-----------具体职位
+
+我们最终获取的清洗后数据如上所示。加入本次项目需求（虚拟）要求我们获取以下几个问题：
+
+
+1、实习僧的实习招聘主页主要是什么性质的？
+2、哪些公司最缺实习僧？
+3、实习岗位具体分布的地域和城市？
+4、哪些城市对实习僧的需要最为强烈？
+5、实习工资大致什么水平，与城市和地域是否有关系？
+6、实习岗位一般都要求每周到岗多少天？
+7、实习周期一般需要多长时间？
+8、哪些职位需求最为频繁？
+
+
+带着这些个问题，让我们尽情的畅游在可视化的世界里吧……
+
+1、实习僧的实习招聘主页主要是什么性质的？
+
+length(unique(mydata$internship))
+3357
+
+绝望了，一共爬了5000条实习职位信息，做了去重处理，显示仍有3357条，建议实习僧的产品运营团队考虑下要不要标准化一下这个职位性质，内门怎么可以创造这么多独特的职位~_~
+
+
+对于这个问题，真的难倒我了，因为所爬数据中的职位性质没有统一的预设标准，所以我只能用文本分词的形式来进行提取了，先分词，然后统计高频词，最后按照词频来进行模糊分析啦（可我我对文本挖掘一窍不通啊~_~）
+
+top100<-table(mydata$internship)%>%as.data.frame(stringsAsFactors=FALSE)%>% arrange(desc(Freq))%>%.[1:100,]
+
+treemap(top100, index=c("Var1"), vSize="Freq",title='实习僧职位性质分布图',palette='RdBu',
+fontsize.title=18,fontsize.labels=12,fontface.labels="plain",fontfamily.title="mono",fontfamily.labels="mono")
+
+
+从实习职位分布图上来看，人力资源实习生职位需求最为强烈，其次是运营、财务、新媒体，这些类型的职位多为现代新兴服务业，更为符合大学生这一群体的口味和兴趣。
+
+myrevieww<-mydata$internship
+thewords <- segmentCN(myrevieww,nature=T)%>%unlist()
+thewords <- gsub("[a-z]|\\.", "", thewords)
+thewords<-thewords[nchar(thewords)>1]
+reviewdata<-table(thewords)%>%as.data.frame(stringsAsFactors = FALSE)%>% arrange(desc(Freq))%>%filter(thewords!="实习生")
+wordcloud<-wordcloud2(reviewdata[1:1000,],color="random-light",minSize=.6,size=1,backgroundColor="dark",minRotation=-pi/6,maxRotation=-pi/6,fontFamily ="微软雅黑");wordcloud
+
+但是将职位性质分词整理成关键词后，似乎结果有所不同。
+
+2、哪些公司最缺实习僧？
+
+这里我们来统计所爬职位信息中公司发布职位的频率，发布最多的则作为评价公司对实习生需求的标准。
+
+myjob<-table(mydata$company)%>%as.data.frame(stringsAsFactors=FALSE)%>%arrange(desc(Freq))
+
+#看看前十名都是那些公司：
+myjob15<-arrange(myjob[1:15,],desc(Freq))
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/circle-rose.png",width=1580,height=950)
+showtext.begin()
+ggplot(data=myjob15,aes(x=reorder(Var1,-Freq),y=Freq,fill=Freq))+
+geom_linerange(aes(ymin=0,ymax=42),linetype=5,size=.2,colour="#858585")+
+geom_image(aes(x=0,y=-40),image="D:/R/Image/image1.jpg", size =.2)+
+geom_text(aes(y=45,label=paste0(Var1,"\n",Freq)),vjust=1,size=5)+
+geom_bar(stat="identity",width=1,col="white")+
+geom_hline(yintercept =54,color="black",size=.5)+
+geom_point(aes(y=48,size=Freq),shape=21,fill="#ED7D31",,alpha=0.6,col="orange")+
+labs(title="Top 15 of Company",caption="Data Source:shixiseng")+
+coord_polar(theta="x")+
+ylim(-40,60)+
+scale_size_area(max_size=20)+
+guides(fill=FALSE,size=guide_legend(reverse=TRUE,title=NULL))+
+theme_minimal()+
+theme(
+axis.title=element_blank(),
+axis.text=element_blank(),
+panel.grid=element_blank(),
+legend.text=element_text(family="myfont",size=12),
+legend.title=element_text(family="myfont",size=15,hjust=1),
+plot.title=element_text(family="myfont",size=35),
+plot.caption=element_text(family="myfont",size=18,hjust=0,lineheight=1.2)
+)
+showtext.end()
+dev.off()
+
+write.table (myjob[1:100,],"D:/R/File/shixiseng_job.csv",sep=",",row.names=FALSE)
+
+前一百个实习生需求最旺盛企业：
+
+3、实习岗位具体分布的地域和城市？
+
+先做一个地域分布图：
+
+add<-table(mydata$address_unique)%>%as.data.frame(stringsAsFactors=FALSE)%>%arrange(desc(Freq))%>%filter(nchar(Var1)==2)
+
+
+#城市经纬度查询：
+
+library(rjson)
+library(RCurl)
+library(REmap)
+library(baidumap)
+address<-add$Var1
+baidu_lng <- c()
+baidu_lat <- c()
+ak<-"X8zlxPUdSe2weshrZ1WqnWxb43cfBI2N"
+for(location in address){
+   url<-paste("http://api.map.baidu.com/geocoder/v2/?ak=",ak,"&callback=renderOption&output=json&address=",location,sep="")
+   url_string <- URLencode(url)                    
+   msg.load <- tryCatch({
+    
+   json <-readLines(url_string,warn=F,encoding="UTF-8")
+   msg.load <- "TRUE"
+  
+   },error=function(e) {
+    
+   "error"
+  
+     }
+)
+
+
+    if(msg.load=='error'){
+    
+    Sys.sleep(runif(1,3,10))
+    
+    msg.load <- tryCatch({
+      
+    connect <- readLines(url_string,warn=F,encoding = "UTF-8")   
+    msg.load <- "TRUE"
+    
+     }, error = function(e){
+      
+     "error"
+    
+     }
+    
+     )
+  
+    }
+ 
+
+geo <- fromJSON(substr(json,regexpr("\\(",json)+1,nchar(json)-1))  
+    if(msg.load=='error'){
+     
+    lng<-'error1'
+       
+    lat<-'error1'
+    }else{
+       
+    
+    lng<-geo$result$location$lng    
+    lat<-geo$result$location$lat
+    
+    if(length(lng) == 0){
+               
+        lng <- "error2"
+      
+        lat <- "error2"
+    
+      }
+  
+    }
+
+lng<-geo$result$location$lng
+lat<-geo$result$location$lat                 
+baidu_lng<-c(baidu_lng,lng)
+baidu_lat<-c(baidu_lat,lat)
+}
+result<-data.frame(address=address,long=baidu_lng,lat=baidu_lat,stringsAsFactors=FALSE)
+pointdata<-left_join(add,result,by=c("Var1"="address"))
+
+#成功获取目标城市经纬度信息：
+解析来制作分布图：
+
+
+geojson <-readOGR("D:/R/mapdata/State/china.geojson","OGRGeoJSON",stringsAsFactors=FALSE)
+Encoding(geojson$name)<-"UTF-8"
+
+china_Mapdata<-geojson@data
+china_MapdataPloygon<-fortify(geojson)
+
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/shixiseng_jobcity.png",width=1200,height=640)
+showtext.begin()
+ggplot()+ 
+geom_polygon(data=china_MapdataPloygon,aes(x=long,y=lat,group=group),col="grey60",fill="white",size=.2,alpha=.4)+
+geom_point(data=pointdata,aes(x=long,y=lat,size=Freq),shape=21,fill="#C72E29",col="#014D64",alpha=0.6)+ 
+scale_size_area(max_size=15,guide=guide_legend(reverse=TRUE,title=NULL))+
+     coord_map("polyconic") +
+     labs(title="实习僧职位需求城市分布图",caption="数据来源：实习僧官网")+  
+     theme(
+          title=element_text(family="myfont",size=18),
+          plot.title=element_text(size=24), 
+          plot.caption=element_text(family="myfont",size=18,hjust=0),        
+          panel.grid = element_blank(),
+          panel.background = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_blank(),
+          legend.position = c(0.02,0.6),
+          )
+showtext.end()
+dev.off()
+
+4、哪些城市对实习僧的需要最为强烈？
+
+从第三个问题及其分析结果上我们已经看出了整体形势，北上广深依然是需求最为旺盛的地区，这也符合城市的实际经济发展情况及我们的预期。
+
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/jingjixue2.png",width=800,height=600)
+showtext.begin()
+ggplot(pointdata[1:20,],aes(reorder(Var1,Freq),Freq))+
+geom_bar(fill="#0C8DC4",stat="identity")+
+coord_flip()+
+labs(title="实习僧职位需求城市分布",caption="数据来源：实习僧官网")+
+geom_text(aes(y=Freq+25,label=Freq),hjust=2,colour="#C72E29",size=5)+
+theme_bw()+
+theme(
+      panel.border=element_blank(),
+      panel.grid.major=element_line(linetype="dashed"),
+      panel.grid.minor=element_blank(),
+      plot.title=element_text(size=15,colour="#003087",family="myfont"),
+      plot.caption=element_text(hjust=0,size=10),
+      axis.title=element_blank(),
+      axis.text=element_text(size=15)
+      )
+showtext.end()
+dev.off()
+
+5、实习工资大致什么水平，与城市和地域是否有关系？
+
+myjob_salary<-mydata[,c("address_unique","salary_low","salary_high")]  
+myjob_salary$salary_low<-as.numeric(myjob_salary$salary_low)
+myjob_salary$salary_high<-as.numeric(myjob_salary$salary_high)
+myjob_salary<-na.omit(myjob_salary)%>%arrange(salary_high)%>%filter(salary_high>=20&salary_high<=500)
+myjob_salary$id<-seq_len(nrow(myjob_salary))
+myjob_salary$meansalary<-(myjob_salary$salary_low+myjob_salary$salary_high)/2
+
+
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/shixiseng_jobsaleryarea.png",width=1200,height=800)
+showtext.begin()
+ggplot(myjob_salary,aes(id))+
+geom_ribbon(aes(ymin=salary_low,ymax=salary_high),fill = "grey70")+
+labs(title="实习僧职位工资区间分布",caption="数据来源：实习僧官网")+
+geom_line(aes(y=meansalary))+
+theme_minimal()+
+theme(
+      panel.border=element_blank(),
+      panel.grid.major=element_line(linetype="dashed"),
+      panel.grid.minor=element_blank(),
+      plot.title=element_text(size=30,colour="#003087",family="myfont"),
+      plot.caption=element_text(hjust=0,size=20),
+      axis.title=element_blank(),
+      axis.text.y=element_text(size=15),
+      axis.text.x=element_blank()
+      )
+showtext.end()
+dev.off()
+myjob_salary$address_unique<-substr(myjob_salary$address_unique,1,2)
+myjobcitysalary<-aggregate(meansalary~address_unique,data=myjob_salary,FUN=mean)
+
+treemap(na.omit(myjobcitysalary), index=c("address_unique"),
+vSize="meansalary",title='实习僧职位薪酬地域分布图',palette='RdBu',
+fontsize.title=18,fontsize.labels=12,fontface.labels="plain",
+fontfamily.title="mono",fontfamily.labels="mono")
+
+安全全部参与计算聚合的平均工资来看，北上广深反而没有什么吸引力了排名普遍不高，我猜想是因为一线城市的低工资职位数量过多，压低了平均值。
+
+接下来我们按照100，150的临界点进行工资高低的划分。
+
+salary100<-myjob_salary%>%filter(meansalary<=100)%>%select(address_unique)%>%table()%>%as.data.frame(stringsAsFactors=FALSE)
+salary100<-na.omit(salary100)%>%arrange(desc(Freq));names(salary100)<-c("city","num")
+
+
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/salary100.png",width=1200,height=900)
+showtext.begin()
+ggplot(salary100[salary100$num>=5,],aes(reorder(city,-num),num))+
+geom_bar(fill="#0C8DC4",stat="identity")+
+labs(title="实习僧职位薪资城市分布（日薪低于100）",caption="数据来源：实习僧官网")+
+geom_text(aes(y=num+10,label=num),hjust=.5,colour="#C72E29",size=5)+
+theme_bw()+
+theme(
+      panel.border=element_blank(),
+      panel.grid.major=element_line(linetype="dashed"),
+      panel.grid.minor=element_blank(),
+      plot.title=element_text(size=25,colour="#003087",family="myfont"),
+      plot.caption=element_text(hjust=0,size=18),
+      axis.title=element_blank(),
+      axis.text=element_text(size=15)
+      )
+showtext.end()
+dev.off()
+
+salary200<-myjob_salary%>%filter(meansalary>=200)%>%select(address_unique)%>%table()%>%as.data.frame(stringsAsFactors=FALSE)
+salary200<-na.omit(salary200)%>%arrange(desc(Freq));names(salary200)<-c("city","num")
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/salary200.png",width=1200,height=900)
+showtext.begin()
+ggplot(salary200,aes(reorder(city,-num),num))+
+geom_bar(fill="#0C8DC4",stat="identity")+
+labs(title="实习僧职位薪资城市分布（日薪高于200）",caption="数据来源：实习僧官网")+
+geom_text(aes(y=num+10,label=num),hjust=.5,colour="#C72E29",size=5)+
+theme_bw()+
+theme(
+      panel.border=element_blank(),
+      panel.grid.major=element_line(linetype="dashed"),
+      panel.grid.minor=element_blank(),
+      plot.title=element_text(size=25,colour="#003087",family="myfont"),
+      plot.caption=element_text(hjust=0,size=18),
+      axis.title=element_blank(),
+      axis.text=element_text(size=15)
+      )
+showtext.end()
+dev.off()
+
+salary100_200<-myjob_salary%>%filter(meansalary>100 & meansalary<200)%>%select(address_unique)%>%table()%>%as.data.frame(stringsAsFactors=FALSE)
+salary100_200<-na.omit(salary100_200)%>%arrange(desc(Freq));names(salary100_200)<-c("city","num")
+
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/salary100-200.png",width=1600,height=900)
+showtext.begin()
+ggplot(salary100_200,aes(reorder(city,-num),num))+
+geom_bar(fill="#0C8DC4",stat="identity")+
+labs(title="实习僧职位薪资城市分布（日薪处于100-200之间）",caption="数据来源：实习僧官网")+
+geom_text(aes(y=num+10,label=num),hjust=.5,colour="#C72E29",size=5)+
+theme_bw()+
+theme(
+      panel.border=element_blank(),
+      panel.grid.major=element_line(linetype="dashed"),
+      panel.grid.minor=element_blank(),
+      plot.title=element_text(size=25,colour="#003087",family="myfont"),
+      plot.caption=element_text(hjust=0,size=18),
+      axis.title=element_blank(),
+      axis.text=element_text(size=15)
+      )
+showtext.end()
+dev.off()
+
+
+分析到这里，趋势已经很明显了，因为北上广深等一线城市的职位实在是太多了，无论是高新职位还是低薪实习岗位都能排在全国各城市的前列，所以出现日均工资很普通的现象。相对而言，日薪在200以上的高薪职位更能代表各大城市对日常实习生需求的强烈程度，因为在这一阶段，北上广深的优势非常明显，遥遥领先与其他二线城市，而针对日薪高于200的实习职位统计结果可以看出来，北上技压群雄（不愧是帝都和魔都），深圳和广州处于第二线，200以上的高新实习职位遇北上相比，相差比较大，仅占前两者约1/3~1/5。而杭州、南京、武汉、合肥则稳稳处于第三梯队。
+
+
+
+6、实习岗位一般都要求每周到岗多少天？
+
+myperiod<-mydata$period
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/internperiod.png",width=1000,height=750)
+showtext.begin()
+ggplot(data=NULL,aes(myperiod)) +
+geom_histogram(stat="count",show.legend=FALSE,binwidth=1,fill="#F86977",col=NA) +
+labs(title="实习职位要求每周工作天数",caption="数据来源：实习僧官网")+
+theme(panel.background=element_rect(fill=NA),
+        plot.background=element_rect(fill=NA),
+        plot.title =element_text(size=20,family="myfont"),
+        plot.caption=element_text(hjust=0,family="myfont"),
+        axis.line=element_line(colour="grey80"),
+        axis.text=element_text(size=12,family="myfont"),
+        axis.title=element_blank())
+showtext.end()
+dev.off()
+
+从分布上看，一周五天居多，这样是正常的工作日现象。3天、4天也是用人单位补缴能接受的周工作天数。
+
+
+
+7、实习周期一般需要多长时间？
+
+myduration<-mydata$duration
+mydurationhz<-table(myduration)%>%as.data.frame(stringsAsFactors=FALSE)%>%arrange(desc(Freq))
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/internduration.png",width=1000,height=750)
+showtext.begin()
+ggplot(data=mydurationhz,aes(reorder(myduration,-Freq),Freq)) +
+geom_bar(stat="identity",show.legend=FALSE,width=1,fill="#065573",col=NA) +
+geom_text(aes(y=Freq+20,label=Freq),hjust=.5,colour="#C72E29",size=5)+
+labs(title="实习职位要求工作时间周期",caption="数据来源：实习僧官网")+
+theme(panel.background=element_rect(fill=NA),
+        plot.background=element_rect(fill=NA),
+        plot.title =element_text(size=20,family="myfont"),
+        plot.caption=element_text(hjust=0,family="myfont"),
+        axis.line=element_line(colour="grey80"),
+        axis.text=element_text(size=12,family="myfont"),
+        axis.title=element_blank())
+showtext.end()
+dev.off()
+
+
+8、哪些职位需求最为频繁？
+
+下面开始分析最后一个问题，也是我认为最有价值，最值得探究的问题，最后一个待分析指标是实习职位，这个指标跟我们最初分析的那个岗位性质略有不同，该变量相对比较规范（职位类别有确定的预设范围）。
+
+我们新建一个分析数据，用职位、工资区间的中间值，地区三个变量进行后续分析：
+mydata$salary_high<-as.numeric(mydata$salary_high)
+mydata$salary_low<-as.numeric(mydata$salary_low)
+mydata$salary_mean<-(mydata$salary_low+mydata$salary_high)/2
+myworkdata<-mydata[,c("address_unique","work","salary_mean")]
+
+首先分析下岗位的集中分布情况：
+
+myworkcount<-table(myworkdata[,2])%>%as.data.frame(stringsAsFactors=FALSE)%>%arrange(desc(Freq))
+
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/interndworkcount.png",width=1000,height=750)
+showtext.begin()
+ggplot(data=myworkcount,aes(reorder(Var1,-Freq),Freq)) +
+geom_bar(stat="identity",show.legend=FALSE,width=.75,fill="#5D8DA6",col=NA) +
+geom_text(aes(y=Freq+50,label=Freq),hjust=.5,colour="#C72E29",size=5)+
+labs(title="实习职位类别分布",caption="数据来源：实习僧官网")+
+theme(panel.background=element_rect(fill=NA),
+        plot.background=element_rect(fill=NA),
+        plot.title =element_text(size=20,family="myfont"),
+        plot.caption=element_text(hjust=0,family="myfont"),
+        axis.line=element_line(colour="grey80"),
+        axis.text=element_text(size=12,family="myfont"),
+        axis.title=element_blank())
+showtext.end()
+dev.off()
+
+各个岗位工资分布：
+
+myworkmean<-aggregate(salary_mean~work,data=myworkdata,FUN=mean)
+
+CairoPNG(file="E:/微信公众号/公众号——数据小魔方/2017年5月/20170512/interndworkmean.png",width=1000,height=750)
+showtext.begin()
+ggplot(data=myworkmean,aes(reorder(work,-salary_mean),salary_mean)) +
+geom_bar(stat="identity",show.legend=FALSE,width=.75,fill="#5D8DA6",col=NA) +
+geom_text(aes(y=salary_mean+5,label=round(salary_mean,1)),hjust=.5,colour="#C72E29",size=10)+
+labs(title="实习职位类别平均工资",caption="数据来源：实习僧官网")+
+theme(panel.background=element_rect(fill=NA),
+        plot.background=element_rect(fill=NA),
+        plot.title =element_text(size=25,family="myfont"),
+        plot.caption=element_text(hjust=0,family="myfont",size=20),
+        axis.line=element_line(colour="grey80"),
+        axis.text=element_text(size=18,family="myfont"),
+        axis.title=element_blank())
+showtext.end()
+dev.off()
+
+从工资均数上来看，七大类职位差距不大，说明仅就实习岗位工资而言，结合爬取的总体样本，不考虑地域差异，实习工资差异不很明显。
+
+最后，让我们用一个桑基图来完结本次针对实习僧网站的爬虫分析：
+
+
+write.table (myworkdata,"D:/R/File/shixiseng_workdata.csv",sep=",",row.names=FALSE)
+
+
+桑基流向图的趋势灰常明显，北上两市在所有类别职位（7大类）上均居前列，各职位类别中，市场和运营职位需求最为强烈，北京和上海在对市场和运营职位的需求容量机会平分秋色。广州和深圳仍然略于北上，但是与其他二线城市相比较，优势仍然很明显。（也许是因为实习僧做为主打校园实习岗位信息咨询平台，针对的主流群体基本以在校大学生为主，而北上广深的高等教育资源分布差异明显，在高校数量方面，北上的要沾光很多，广州与深圳的高校资源相对比较匮乏，在以上分析的各项指标中都占尽劣势）。
+
+
+
+
